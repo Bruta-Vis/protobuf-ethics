@@ -38,7 +38,7 @@ uv run python -m grpc_tools.protoc -I proto --python_out=training/gen proto/ethi
 Run the Python exporter to fetch and clean the ETHICS CSVs from Hugging Face.
 
 ```bash
-uv run python scripts/export_to_jsonl.py --out data/raw
+uv run python scripts/get_raw_training_data.py --out data/raw
 ```
 
 Outputs:
@@ -60,7 +60,50 @@ cargo run
 
 ---
 
-## Structure
+### 6. Calculate raw text length statistics
+
+Use this script to analyze the character-length distribution of the `text` field across all `commonsense` JSONL files in `data/raw/`.
+It outputs per-file and overall statistics (count, min, max, mean, std, p25, p50, p75) to a TOML file:
+
+```
+data/stats/commonsense_length_stats.toml
+```
+
+#### Run manually
+```bash
+python scripts/calculate_raw_text_length_stats.py
+```
+
+#### Example output
+```toml
+[overall]
+count = 21759
+min = 10
+max = 12198
+mean = 971.80
+std = 1082.11
+p25 = 56
+p50 = 609
+p75 = 1719
+
+[files."commonsense-train.jsonl"]
+count = 13910
+min = 10
+max = 12198
+mean = 1023.48
+std = 1141.82
+p25 = 56
+p50 = 667
+p75 = 1811
+```
+
+#### Purpose
+These statistics help determine optimal pruning thresholds for text length (in characters) to balance dataset quality and model efficiency.
+For example, the default 1,000-character cutoff retains roughly 60% of examples while removing long Reddit-style stories that inflate token count.
+
+---
+
+### Structure
 ```
 /scripts/              # Python exporters
 /proto/                # Protobuf schemas
