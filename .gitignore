@@ -22,8 +22,8 @@ Cargo.lock
 #.idea/
 
 
-data/raw/**
-data/processed/**
+data/**/**
+**/.DS_Store
 *.pb
 *.pb.zst
 training/gen/**
