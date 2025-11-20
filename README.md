@@ -1,47 +1,57 @@
 # Protobuf Ethics Dataset
 
 ## Intent
-This repository focuses on collecting, cleaning, and structuring the **ETHICS** dataset for efficient use in generative AI training.  
-It provides tools to export raw data from Hugging Face, convert it into dense, machine-readable formats (JSONL → Protocol Buffers), and prepare it for model ingestion.
+This repository focuses on collecting, cleaning, and structuring the **ETHICS** dataset for efficient use in generative AI training. It provides tools to export raw data from Hugging Face, clean and prune it, compute statistics, and convert it into dense, machine‑readable formats (JSONL → Protocol Buffers) for model ingestion.
 
 ## Purpose
 Large language models benefit from curated ethical reasoning data, but the original ETHICS dataset is distributed as CSVs that require cleaning and normalization.  
-This project standardizes the pipeline to transform ETHICS into a compact, schema-defined format suitable for high-throughput training pipelines.
-
+This project standardizes the full pipeline and provides pruning, statistics, and schema‑based serialization for high‑throughput training.
 
 ### ETHICS Dataset Overview
-The **ETHICS dataset** (Hendrycks et al., 2021) is a large-scale benchmark designed to evaluate a model’s understanding of human moral reasoning. It contains five complementary subsets—**Commonsense**, **Deontology**, **Virtue Ethics**, **Utilitarianism**, and **Justice**—each consisting of short text scenarios paired with human moral judgments. These tasks test a model’s ability to reason about duties, virtues, outcomes, and social norms rather than factual recall. ETHICS has become a standard reference for research in AI alignment and moral reasoning. In this repository, the dataset is pulled from [Hugging Face](https://huggingface.co/datasets/hendrycks/ethics) and transformed into structured JSONL and Protocol Buffer formats for efficient training and reproducibility.
+The **ETHICS dataset** (Hendrycks et al., 2021) evaluates a model’s ability to understand human moral reasoning across five subsets: **Commonsense**, **Deontology**, **Virtue Ethics**, **Utilitarianism**, and **Justice**.  
+This repository retrieves the dataset from Hugging Face, cleans it, prunes long examples, analyzes distributions, and serializes the data to Protocol Buffers for efficient training.
+
+Dataset source:  
+**Hendrycks et al. (2021). ETHICS: Aligning AI With Shared Human Values.**  
+https://arxiv.org/abs/2008.02275
 
 ---
 
-## Setup
+# Setup & Pipeline
 
-### 1. Create environment
+The following steps are ordered to match the actual workflow:
+1. **Download raw ETHICS JSONL**
+2. **Calculate the text‑length distribution**
+3. **Choose a cutoff**
+4. **Prune examples exceeding the cutoff**
+5. **Convert JSONL → Protobuf**
+
+---
+
+## 1. Create environment
+
 ```bash
 uv venv .venv
 source .venv/bin/activate
 uv sync
 ```
 
-### 2. Install dependencies manually (if needed)
+Optional dependency install:
+
 ```bash
 uv add datasets protobuf grpcio-tools zstandard transformers tokenizers
 ```
 
-### 3. Generate Python protobuf classes
-```bash
-mkdir -p training/gen
-uv run python -m grpc_tools.protoc -I proto --python_out=training/gen proto/ethics.proto
-```
+---
 
-### 4. Export ETHICS dataset to JSONL
-Run the Python exporter to fetch and clean the ETHICS CSVs from Hugging Face.
+## 2. Export ETHICS dataset to JSONL
 
 ```bash
 uv run python scripts/get_raw_training_data.py --out data/raw
 ```
 
 Outputs:
+
 ```
 data/raw/
   commonsense-train.jsonl
@@ -51,84 +61,113 @@ data/raw/
   virtue-train.jsonl
 ```
 
-### 5. Convert JSONL to Protobuf (Rust pipeline)
-After exporting, the Rust pipeline reads from `data/raw/` and writes compressed protobuf shards to `data/processed/`.
-
-```bash
-cargo run
-```
-
 ---
 
-### 6. Calculate raw text length statistics
+## 3. Calculate raw text‑length statistics
 
-Use this script to analyze the character-length distribution of the `text` field across all `commonsense` JSONL files in `data/raw/`.
-It outputs per-file and overall statistics (count, min, max, mean, std, p25, p50, p75) to a TOML file:
+This step analyzes character‑length distributions for all commonsense examples and helps determine an appropriate pruning cutoff.
+
+```bash
+uv run python scripts/calculate_raw_text_length_stats.py
+```
+
+Output summary stored at:
 
 ```
 data/stats/commonsense_length_stats.toml
 ```
 
-#### Run manually
+Use this file to determine the pruning threshold  
+(1000 characters is recommended and tested).
+
+---
+
+## 4. Prune the dataset using Rust
+
+Once the cutoff is determined, prune all commonsense JSONL files:
+
 ```bash
-python scripts/calculate_raw_text_length_stats.py
+cargo run --bin prune_data_by_length
 ```
 
-#### Example output
-```toml
-[overall]
-count = 21759
-min = 10
-max = 12198
-mean = 971.80
-std = 1082.11
-p25 = 56
-p50 = 609
-p75 = 1719
+Or specify only particular files:
 
-[files."commonsense-train.jsonl"]
-count = 13910
-min = 10
-max = 12198
-mean = 1023.48
-std = 1141.82
-p25 = 56
-p50 = 667
-p75 = 1811
+```bash
+cargo run --bin prune_data_by_length -- data/raw/commonsense-train.jsonl
 ```
 
-#### Purpose
-These statistics help determine optimal pruning thresholds for text length (in characters) to balance dataset quality and model efficiency.
-For example, the default 1,000-character cutoff retains roughly 60% of examples while removing long Reddit-style stories that inflate token count.
+Pruned outputs are written to:
+
+```
+data/filtered/
+```
+
+Each run prints a summary:
+
+```
+commonsense-train.jsonl: kept=8421 dropped=5489 -> data/filtered/commonsense-train.jsonl
+```
+
+This step dramatically reduces dataset size and removes lengthy Reddit‑style stories that inflate token count.
 
 ---
 
-### Structure
+## 5. Convert JSONL → Protobuf using `ethics-pipeline`
+
+After pruning, the main pipeline converts examples into protobuf shards:
+
+```bash
+cargo run --bin ethics-pipeline
 ```
-/scripts/              # Python exporters
-/proto/                # Protobuf schemas
-/src/                  # Rust pipeline
-/training/             # Training utilities and generated protobuf classes
+
+This tool:
+
+- Reads pruned files from `data/filtered/`
+- Fills the schema defined in `proto/ethics.proto`
+- Shards output into 32–64 MB chunks
+- Compresses using zstd
+- Writes to:
+
+```
+data/processed/<subset>/<split>-00000.pb.zst
+```
+
+These protobuf shards are optimized for training speed and minimal disk I/O.
+
+---
+
+## 6. Generate Python protobuf classes (optional for training)
+
+If training or evaluation happens in Python:
+
+```bash
+mkdir -p training/gen
+uv run python -m grpc_tools.protoc     -I proto --python_out=training/gen proto/ethics.proto
+```
+
+---
+
+# Project Structure
+
+```
+/scripts/              # Python exporters, stats analysis, utilities  
+/proto/                # Protobuf schema  
+/src/                  # Rust pipeline modules  
+/src/bin/              # CLI binaries (pruning, main pipeline)  
+/training/             # Python training utilities  
 /data/
-  raw/                 # JSONL dumps from ETHICS subsets
-  processed/           # Serialized protobuf shards
+  raw/                 # Unmodified JSONL from ETHICS
+  filtered/            # Pruned JSONL (post-cutoff)
+  processed/           # Protocol Buffer shards
+  stats/               # TOML statistics
 ```
 
-## Design Principles
-- **Schema consistency** – all subsets conform to a unified `Example` message.
-- **Compact encoding** – Protocol Buffers with zstd compression minimize I/O and storage.
-- **Reproducibility** – deterministic exports and stable field numbering.
-- **Language-agnostic format** – Protocol Buffers schema usable from any runtime; reference pipeline in Rust and training in Python.
-
-## Usage
-Use this repository to prepare and serialize the ETHICS dataset for downstream model training or evaluation tasks.  
-It provides a clean, versioned data flow from raw Hugging Face CSVs to ready-to-train protobuf shards.
+# Design Principles
+- **Schema consistency** – All cleaned data conforms to one protobuf message.
+- **Compact encoding** – Protobuf + zstd minimize storage and speed up training.
+- **Efficiency** – Long stories removed, shards optimized for streaming.
+- **Reproducibility** – Deterministic exports and transparent preprocessing.
 
 ---
-*Goal: Structured ethical reasoning data for efficient and reproducible model training.*
 
-
-
-
-Dataset source: [ETHICS: Aligning AI With Shared Human Values](https://arxiv.org/abs/2008.02275) —  
-Dan Hendrycks, Collin Burns, Steven Basart, Andrew Critch, Jerry Li, Dawn Song, and Jacob Steinhardt (2021, ICLR).
+*Goal: structured ethical‑reasoning data for efficient and reproducible model training.*
